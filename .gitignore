@@ -1,0 +1,16 @@
+# Python virtual environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Pytest cache
+.pytest_cache/
+
+# IDE files
+.vscode/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
