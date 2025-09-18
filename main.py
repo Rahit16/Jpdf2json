@@ -51,26 +51,43 @@ The output JSON array MUST contain objects with the following keys in English. T
 The output MUST be a valid JSON array. Do not include any text before or after the JSON.
 """
 
-def extract_text_from_pdf(file_stream: io.BytesIO, read_all_pages: bool = True) -> str:
+def extract_text_from_pdf(file_stream: io.BytesIO, pages: str = "all") -> str:
     """
-    Extracts text from a PDF file.
+    Extracts text from a PDF file based on a specified page range.
     
     Args:
         file_stream: The file-like object of the PDF.
-        read_all_pages: If True, reads all pages; otherwise, reads only the first page.
+        pages: A string specifying the pages to read. 
+               Can be "all", a single page number (e.g., "1"), or a range (e.g., "1-3").
         
     Returns:
         A single string containing the extracted text.
     """
     reader = PdfReader(file_stream)
     text = ""
-    if read_all_pages:
+    total_pages = len(reader.pages)
+    
+    if pages.lower() == "all":
         for page in reader.pages:
             text += page.extract_text() or ""
     else:
-        # Read only the first page
-        if reader.pages:
-            text += reader.pages[0].extract_text() or ""
+        try:
+            if "-" in pages:
+                start_page, end_page = map(int, pages.split('-'))
+                # Adjust for 0-based indexing
+                start_page = max(0, start_page - 1)
+                end_page = min(total_pages, end_page)
+                for i in range(start_page, end_page):
+                    text += reader.pages[i].extract_text() or ""
+            else:
+                page_number = int(pages)
+                if 1 <= page_number <= total_pages:
+                    # Adjust for 0-based indexing
+                    text += reader.pages[page_number - 1].extract_text() or ""
+        except (ValueError, IndexError):
+            # Return an empty string or handle the error as needed
+            return ""
+            
     return text
 
 @app.get("/", response_class=HTMLResponse)
@@ -133,26 +150,27 @@ async def read_root():
 @app.post("/extract-data/")
 async def extract_data_from_pdf(
     pdf_file: UploadFile = File(...),
-    read_all_pages: bool = Query(True, description="Set to 'false' to read only the first page, or 'true' to read all pages.")
+    pages: str = Query("all", description="Specify pages to read. 'all' for all pages, '1' for a single page, '1-3' for a range of pages.")
 ):
     """
     Accepts a PDF file, extracts text, uses the Gemini AI to parse real estate data,
     and returns a downloadable JSON file containing an array of listings.
     
-    - **`read_all_pages`**: An optional query parameter.
-      - **`true`** (default): Processes the entire PDF document.
-      - **`false`**: Processes only the first page.
+    - **`pages`**: An optional query parameter.
+      - **`all`** (default): Processes the entire PDF document.
+      - **`1`**: Processes only page 1.
+      - **`1-3`**: Processes pages 1 through 3.
     """
     try:
         # Read the PDF file content
         content = await pdf_file.read()
         file_stream = io.BytesIO(content)
 
-        # Extract text from the PDF, with the option to read all pages or just the first
-        extracted_text = extract_text_from_pdf(file_stream, read_all_pages=read_all_pages)
+        # Extract text from the PDF based on the user's page selection
+        extracted_text = extract_text_from_pdf(file_stream, pages=pages)
         
         if not extracted_text:
-            raise HTTPException(status_code=400, detail="Could not extract text from the PDF file.")
+            raise HTTPException(status_code=400, detail="Could not extract text from the specified page(s) of the PDF file. Please ensure the page number(s) are valid and contain text.")
 
         # Generate the payload for the Gemini AI
         full_prompt = f"{PROMPT}\n\nDocument Text:\n{extracted_text}"
