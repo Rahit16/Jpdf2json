@@ -2,7 +2,7 @@ import os
 import io
 import json
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import JSONResponse
 import google.generativeai as genai
 from pypdf import PdfReader
@@ -22,10 +22,13 @@ model = genai.GenerativeModel("gemini-2.5-flash")
 app = FastAPI()
 
 # Prompt to guide the Gemini AI
+# Updated to handle multiple listings and return a JSON array.
 PROMPT = """
-You are a real estate data extraction expert. I will provide you with the text content of a Japanese real estate PDF document. Your task is to extract specific real estate information and format it as a single JSON object.
+You are a real estate data extraction expert. I will provide you with the text content of a Japanese real estate PDF document. This document may contain multiple real estate listings.
 
-The output JSON MUST have the following keys in English. The extracted values should also be translated into English. If a value is not present in the document or a direct translation is not possible (e.g., a specific address), use null.
+Your task is to identify and extract the information for ALL unique listings found in the document. For each listing, format the information as a single JSON object. The final output MUST be a single JSON array containing all of the extracted listing objects.
+
+The output JSON array MUST contain objects with the following keys in English. The extracted values should also be translated into English. If a value for a specific key is not present in a listing, use null.
 
 - **Property Type:** Look for '戸建て', 'マンション', '土地', '1棟マンション', 'アパート'. Translate the found value to English (e.g., '戸建て' -> 'Detached House').
 - **Price:** Look for '価格', '値段', '販売価格'.
@@ -43,19 +46,32 @@ The output JSON MUST have the following keys in English. The extracted values sh
 - **Construction Date:** Look for '築年月', '建築年月', '増改築'.
 - **Floor Plan & Structure:** Look for '間取り', '構造', '鉄筋コンクリート', '鉄筋鉄骨コンクリート', '鉄骨', '重量鉄骨', '軽量鉄骨', '木造'. Translate to English (e.g., '木造' -> 'Wooden').
 - **Parking:** Look for '車庫', '駐車場'. Translate to English.
+- **Contact Info:** Look for company name and contact details.
 
-The output MUST be a valid JSON object. Do not include any text before or after the JSON.
+The output MUST be a valid JSON array. Do not include any text before or after the JSON.
 """
 
-def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
-    """Extracts text from a PDF file."""
+def extract_text_from_pdf(file_stream: io.BytesIO, read_all_pages: bool = True) -> str:
+    """
+    Extracts text from a PDF file.
+    
+    Args:
+        file_stream: The file-like object of the PDF.
+        read_all_pages: If True, reads all pages; otherwise, reads only the first page.
+        
+    Returns:
+        A single string containing the extracted text.
+    """
     reader = PdfReader(file_stream)
     text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
+    if read_all_pages:
+        for page in reader.pages:
+            text += page.extract_text() or ""
+    else:
+        # Read only the first page
+        if reader.pages:
+            text += reader.pages[0].extract_text() or ""
     return text
-
-
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
@@ -114,20 +130,26 @@ async def read_root():
     """
     return HTMLResponse(content=html_content, status_code=200)
 
-# The rest of your code for /extract-data/ and /download-json/ goes here
 @app.post("/extract-data/")
-async def extract_data_from_pdf(pdf_file: UploadFile = File(...)):
+async def extract_data_from_pdf(
+    pdf_file: UploadFile = File(...),
+    read_all_pages: bool = Query(True, description="Set to 'false' to read only the first page, or 'true' to read all pages.")
+):
     """
     Accepts a PDF file, extracts text, uses the Gemini AI to parse real estate data,
-    and returns a downloadable JSON file.
+    and returns a downloadable JSON file containing an array of listings.
+    
+    - **`read_all_pages`**: An optional query parameter.
+      - **`true`** (default): Processes the entire PDF document.
+      - **`false`**: Processes only the first page.
     """
     try:
         # Read the PDF file content
         content = await pdf_file.read()
         file_stream = io.BytesIO(content)
 
-        # Extract text from the PDF
-        extracted_text = extract_text_from_pdf(file_stream)
+        # Extract text from the PDF, with the option to read all pages or just the first
+        extracted_text = extract_text_from_pdf(file_stream, read_all_pages=read_all_pages)
         
         if not extracted_text:
             raise HTTPException(status_code=400, detail="Could not extract text from the PDF file.")
@@ -140,11 +162,11 @@ async def extract_data_from_pdf(pdf_file: UploadFile = File(...)):
         
         # Parse the JSON response from Gemini
         try:
-            # Clean and parse the JSON string
+            # Clean and parse the JSON string, which is now an array of objects
             json_string = response.text.strip().replace('```json', '').replace('```', '')
             extracted_data = json.loads(json_string)
         except json.JSONDecodeError:
-            raise HTTPException(status_code=500, detail="Failed to parse JSON from Gemini's response. The AI might not have returned a valid JSON object.")
+            raise HTTPException(status_code=500, detail="Failed to parse JSON from Gemini's response. The AI might not have returned a valid JSON array of objects.")
 
         # Return the JSON data with a download header
         return JSONResponse(
